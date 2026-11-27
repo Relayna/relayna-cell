@@ -1,5 +1,39 @@
 # Build Relayna Cell for a standalone Linux VM
 
+## CI packages
+
+The **Cell standalone packages** workflow builds Linux AMD64 and ARM64 bundles
+when a `cell-vMAJOR.MINOR.PATCH` tag is pushed. It also supports **Run workflow**
+in the Actions tab once the workflow is on the default branch. Choose a branch
+to verify its commit or an existing Cell version tag to rebuild that version.
+Tagged artifacts use the tag in their name. Manual branch builds use the commit
+SHA. A rerun has its own attempt number. GitHub Actions retains artifacts for
+30 days.
+
+On the workflow run page, download and unzip the artifact matching the guest
+architecture. Use AMD64 for `x86_64` and ARM64 for `aarch64`. The archive and its
+checksum are inside the artifact. For example, on ARM64 Linux, from the
+unzipped artifact directory:
+
+```sh
+sha256sum -c relayna-cell-linux-arm64.tar.gz.sha256
+tar -xzf relayna-cell-linux-arm64.tar.gz
+```
+
+For a fresh VM, check out the same tag or commit as the artifact and prepare
+the host by following the [Linux setup guide](linux-setup.md). From that
+checkout, keep the tagged setup scripts and use the extracted binaries:
+
+```sh
+sudo bash scripts/setup-linux.sh --engine docker --inference none \
+  --bin-dir /absolute/path/to/relayna-cell-linux-arm64/bin
+sudo install -m 0755 /absolute/path/to/relayna-cell-linux-arm64/bin/cell-task \
+  /opt/relayna-cell/bin/cell-task
+sudo /opt/relayna-cell/bin/cell health
+```
+
+## Local packages
+
 Use a clean checkout of the revision you want to test. Build the Linux binaries
 and a checksum locally with Go 1.26 or later.
 

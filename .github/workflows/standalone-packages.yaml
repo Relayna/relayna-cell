@@ -1,0 +1,64 @@
+name: Cell standalone packages
+
+on:
+  push:
+    tags:
+      - 'cell-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Linux ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Validate package ref
+        id: ref
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            release_tag='^cell-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+            if [[ ! "$GITHUB_REF_NAME" =~ $release_tag ]]; then
+              echo "Expected a Cell release tag such as cell-v1.2.3" >&2
+              exit 1
+            fi
+            package_ref="$GITHUB_REF_NAME"
+          elif [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF_TYPE" == branch && "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            package_ref="$GITHUB_SHA"
+          else
+            echo "Choose a Cell release tag or dispatch the workflow from a branch" >&2
+            exit 1
+          fi
+          printf 'package_ref=%s\n' "$package_ref" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build and verify bundle
+        shell: bash
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          bash scripts/package-standalone.sh "$TARGET_ARCH" dist
+          cd dist
+          sha256sum -c "relayna-cell-linux-$TARGET_ARCH.tar.gz.sha256"
+      - name: Retain package artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: relayna-cell-${{ steps.ref.outputs.package_ref }}-linux-${{ matrix.arch }}-attempt-${{ github.run_attempt }}
+          path: |
+            dist/relayna-cell-linux-${{ matrix.arch }}.tar.gz
+            dist/relayna-cell-linux-${{ matrix.arch }}.tar.gz.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
