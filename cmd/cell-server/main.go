@@ -17,6 +17,7 @@ import (
 	"github.com/sarattha/relayna-cell/internal/engine"
 	"github.com/sarattha/relayna-cell/internal/observer"
 	"github.com/sarattha/relayna-cell/internal/runtime"
+	"github.com/sarattha/relayna-cell/internal/taskinference"
 )
 
 func main() {
@@ -29,6 +30,7 @@ func run() error {
 	data := flag.String("data-dir", "/var/lib/relayna-cell", "persistent state directory")
 	rundir := flag.String("run-dir", "/run/relayna-cell", "Unix socket directory")
 	containerEngine := flag.String("engine", "docker", "local rootful container engine: docker or podman")
+	taskInferenceConfig := flag.String("task-inference-config", "", "owner-only SDK task inference configuration file")
 	flag.Parse()
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("run cell-server as root inside the dedicated Linux VM")
@@ -69,6 +71,14 @@ func run() error {
 		return e
 	}
 	defer m.Close()
+	if *taskInferenceConfig != "" {
+		gateway, err := taskinference.Open(*taskInferenceConfig, m.Proxy.Log)
+		if err != nil {
+			return err
+		}
+		defer gateway.Close()
+		m.Proxy.TaskInference = gateway.Serve
+	}
 	for _, name := range []string{"observer.sock", "api.sock"} {
 		if e = os.Remove(filepath.Join(*rundir, name)); e != nil && !os.IsNotExist(e) {
 			return e

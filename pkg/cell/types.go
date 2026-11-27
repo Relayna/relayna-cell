@@ -27,6 +27,8 @@ type Spec struct {
 	PIDs           int64      `json:"pids"`
 	TimeoutSeconds int        `json:"timeout_seconds"`
 	Allow          []Endpoint `json:"allow,omitempty"`
+
+	TaskInference *TaskInference `json:"task_inference,omitempty"`
 }
 
 func (s *Spec) Defaults() {
@@ -71,6 +73,12 @@ func (s Spec) Validate() error {
 	}
 	if err := ValidateCommand(s.Command, s.Mode == "session"); err != nil {
 		return err
+	}
+	if t := s.TaskInference; t != nil {
+		if s.Mode != "session" || len(s.Allow) != 0 || s.TimeoutSeconds > 300 ||
+			!ValidTaskInferenceID(t.TaskID) || !ValidTaskInferenceID(t.AttemptID) {
+			return fmt.Errorf("task inference requires a session without other egress, a lifetime of at most 300 seconds and valid task and attempt IDs")
+		}
 	}
 	if len(s.Allow) > 16 {
 		return fmt.Errorf("maximum 16 allowed endpoints")

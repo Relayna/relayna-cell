@@ -20,12 +20,16 @@ type Grant struct {
 	CellID  string
 	Allow   []cell.Endpoint
 	Context context.Context
+
+	TaskInference *cell.TaskInference
 }
 type Proxy struct {
 	mu     sync.RWMutex
 	grants map[string]Grant
 	slots  chan struct{}
 	Log    func(string, string, any) error
+
+	TaskInference func(http.ResponseWriter, *http.Request, string, cell.TaskInference)
 }
 
 func New(log func(string, string, any) error) *Proxy {
@@ -99,6 +103,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Port() == "" {
 			authority = net.JoinHostPort(r.URL.Hostname(), "80")
 		}
+	}
+	if g.TaskInference != nil || strings.EqualFold(authority, taskInferenceAuthority) {
+		p.serveTaskInference(w, r.WithContext(ctx), g, authority)
+		return
 	}
 	e, err := Match(authority, g.Allow)
 	if err != nil {

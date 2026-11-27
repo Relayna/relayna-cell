@@ -18,6 +18,7 @@ import (
 
 func Handler(m *engine.Manager) http.Handler {
 	mux := http.NewServeMux()
+	taskInferenceRoute(mux, m)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		if e := m.Store.Healthy(); e != nil {
 			failure(w, e, 503)

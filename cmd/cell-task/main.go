@@ -37,13 +37,14 @@ type taskRequest struct {
 }
 
 type taskResponse struct {
-	Status      string          `json:"status"`
-	TaskID      string          `json:"task_id"`
-	AttemptID   string          `json:"attempt_id"`
-	CellID      string          `json:"cell_id,omitempty"`
-	ExecutionID string          `json:"execution_id,omitempty"`
-	Result      json.RawMessage `json:"result,omitempty"`
-	Error       string          `json:"error,omitempty"`
+	Status      string                     `json:"status"`
+	TaskID      string                     `json:"task_id"`
+	AttemptID   string                     `json:"attempt_id"`
+	CellID      string                     `json:"cell_id,omitempty"`
+	ExecutionID string                     `json:"execution_id,omitempty"`
+	Result      json.RawMessage            `json:"result,omitempty"`
+	Error       string                     `json:"error,omitempty"`
+	Inference   *cell.TaskInferenceSummary `json:"inference,omitempty"`
 }
 
 func main() {
@@ -59,6 +60,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	image := flags.String("image", "", "operator-configured OCI image reference")
 	socket := flags.String("socket", "/run/relayna-cell/api.sock", "local operator Unix socket")
 	timeout := flags.Int("timeout", 60, "execution and Cell lifetime in seconds (1–300)")
+	inference := flags.Bool("inference", false, "allow the configured task inference route")
 	if err := flags.Parse(args); err != nil {
 		if err == flag.ErrHelp {
 			return 0
@@ -66,19 +68,22 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return 1
 	}
 	if flags.NArg() != 0 || *image == "" || !filepath.IsAbs(*socket) || *timeout < 1 || *timeout > 300 {
-		fmt.Fprintln(stderr, "usage: cell-task --image IMAGE [--socket ABSOLUTE_PATH] [--timeout 1–300]")
+		fmt.Fprintln(stderr, "usage: cell-task --image IMAGE [--socket ABSOLUTE_PATH] [--timeout 1–300] [--inference]")
 		return 1
 	}
 	spec := cell.Spec{
 		Image: *image, Mode: "session", CPU: 1, MemoryMiB: 256,
 		WorkspaceMiB: 16, PIDs: 32, TimeoutSeconds: *timeout,
 	}
-	if err := spec.Validate(); err != nil {
+	req, err := readRequest(stdin)
+	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	req, err := readRequest(stdin)
-	if err != nil {
+	if *inference {
+		spec.TaskInference = &cell.TaskInference{TaskID: req.TaskID, AttemptID: req.AttemptID}
+	}
+	if err := spec.Validate(); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
@@ -153,10 +158,23 @@ func executeTask(parent context.Context, c *client.Client, spec cell.Spec, req t
 				response.Error = "Cell task canceled"
 				response.Result = nil
 			}
+			if spec.TaskInference != nil {
+				summary, err := taskInferenceSummary(cleanupCtx, c, created.ID)
+				if err == nil {
+					response.Inference = &summary
+				} else if response.Status == "completed" {
+					response.Status = "failed"
+					response.Error = "Cell task inference audit could not be read"
+					response.Result = nil
+				}
+			}
 		}()
 	}
 	if err != nil || created.ID == "" {
 		response.Error = "Cell creation failed"
+		if spec.TaskInference != nil {
+			response.Error = "Cell task inference session creation failed"
+		}
 		return
 	}
 
@@ -204,6 +222,17 @@ func executeTask(parent context.Context, c *client.Client, spec cell.Spec, req t
 		response.Result = output.Bytes()
 	}
 	return
+}
+
+func taskInferenceSummary(ctx context.Context, c *client.Client, id string) (cell.TaskInferenceSummary, error) {
+	var summary cell.TaskInferenceSummary
+	response, err := c.Request(ctx, http.MethodGet, "/v1alpha1/cells/"+url.PathEscape(id)+"/task-inference", nil)
+	if err != nil {
+		return summary, err
+	}
+	defer response.Body.Close()
+	err = json.NewDecoder(response.Body).Decode(&summary)
+	return summary, err
 }
 
 func deleteTaskCell(ctx context.Context, c *client.Client, id string) error {

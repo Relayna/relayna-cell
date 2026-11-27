@@ -76,3 +76,51 @@ in UTF-8 with decimal lengths. This identifies an attempt without putting its
 raw IDs in the Cell name. Invoking the launcher twice creates two Cells even
 when the task and attempt IDs match. The SDK retains responsibility for
 delivery deduplication and retry policy.
+
+## Opt in to Gateway inference
+
+Start the Cell server with
+`--task-inference-config /etc/relayna-cell/task-inference.json`. The config and
+both credential files must be owner-only regular files owned by the daemon
+user. Store them under an operator-controlled directory. Restart the daemon
+when rotating the files.
+
+```json
+{
+  "gateway_url": "https://gateway.example/v1/chat/completions",
+  "model": "approved-model",
+  "task_service": "reference",
+  "gateway_key_file": "/etc/relayna-cell/task-gateway.key",
+  "worker_token_file": "/etc/relayna-cell/task-worker.token"
+}
+```
+
+Configure the Gateway virtual key for managed `/v1/chat/completions`, its
+configured provider, and exactly the approved model and task registration.
+Keep streaming and tools disabled. Use a separate virtual key for external
+task submission. The worker-token file contains the existing Gateway
+`RELAYNA_WORKER_TOKEN` value. Cell injects both credentials and the task,
+attempt and registration headers from the host for its fixed destination.
+The Gateway URL uses HTTPS, with HTTP accepted for literal loopback addresses
+in local integration tests.
+
+```sh
+sudo docker build -t relayna-cell/sdk-task-inference:local \
+  -f examples/relayna-sdk-task/Dockerfile.inference examples/relayna-sdk-task
+printf '%s\n' '{"task_id":"demo-2","attempt_id":"attempt-1","payload":{"model":"approved-model","prompt":"Say hello."}}' |
+  sudo ./bin/cell-task --inference --image relayna-cell/sdk-task-inference:local
+```
+
+An opted-in task uses `POST http://task-inference.cell/v1/chat/completions`
+through the Cell HTTP proxy. That session only permits this destination and
+model. Requests are nonstreaming and cannot use tool options. Task and attempt
+IDs use 1–256 ASCII letters, digits, periods, underscores, tildes or hyphens,
+starting with a letter or digit. The default offline invocation is unchanged.
+
+After cleanup the launcher projects up to 64 trusted journal decisions in
+`inference: {events, truncated}`. Events carry `event_id`, `timestamp`,
+`decision` (`allow`, `deny`, `result` or `error`), and optional `status`
+(Gateway HTTP status) and fixed `reason` code. The SDK can copy the object to
+`meta.cell.inference` for Studio. Cell records the task and attempt on its
+trusted `cell.requested` event and uses the Cell ID to join decisions. Summary
+events omit request and response bodies, raw headers and credentials.

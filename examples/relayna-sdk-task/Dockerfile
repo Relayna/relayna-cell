@@ -1,2 +1,3 @@
 FROM python:3.13-slim
-COPY --chmod=0755 task.py /opt/relayna-cell/task
+COPY task.py /opt/relayna-cell/task
+RUN chmod 0755 /opt/relayna-cell/task

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/sarattha/relayna-cell/pkg/cell"
 	"github.com/sarattha/relayna-cell/pkg/client"
@@ -22,6 +23,7 @@ func TestExecuteTask(t *testing.T) {
 		name       string
 		frames     []cell.Frame
 		cancel     bool
+		inference  bool
 		savedError string
 		wantError  string
 	}{
@@ -38,6 +40,14 @@ func TestExecuteTask(t *testing.T) {
 			name:      "nonzero exit",
 			frames:    []cell.Frame{{Stream: "exit", ExitCode: &nonzero}},
 			wantError: "exited with code 7",
+		},
+		{
+			name:      "trusted inference summary after cleanup",
+			inference: true,
+			frames: []cell.Frame{
+				{Stream: "stdout", Data: []byte(`{"echo":{"q":"hello"}}`)},
+				{Stream: "exit", ExitCode: &zero},
+			},
 		},
 		{
 			name:      "truncated stream",
@@ -74,9 +84,13 @@ func TestExecuteTask(t *testing.T) {
 		},
 	}
 	req := taskRequest{"task:with-delimiter", "attempt/2", json.RawMessage(`{"q":"hello"}`)}
-	spec := cell.Spec{Image: "fixture:1", Mode: "session", TimeoutSeconds: 10}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			spec := cell.Spec{Image: "fixture:1", Mode: "session", TimeoutSeconds: 10}
+			task := cell.TaskInference{TaskID: "task-1", AttemptID: "attempt-2"}
+			if tt.inference {
+				spec.TaskInference = &task
+			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			var deleted atomic.Bool
@@ -87,6 +101,9 @@ func TestExecuteTask(t *testing.T) {
 					got.Image != spec.Image || got.TimeoutSeconds != spec.TimeoutSeconds ||
 					len(got.Allow) != 0 || len(got.Command) != 0 || got.Name != taskName(req.TaskID, req.AttemptID) {
 					t.Errorf("unexpected create request: %+v, %v", got, err)
+				}
+				if tt.inference && (got.TaskInference == nil || *got.TaskInference != task) || !tt.inference && got.TaskInference != nil {
+					t.Errorf("unexpected inference scope: %+v", got.TaskInference)
 				}
 				_ = json.NewEncoder(w).Encode(cell.Cell{ID: "cell-1", State: "running"})
 			})
@@ -116,6 +133,16 @@ func TestExecuteTask(t *testing.T) {
 				}
 				_ = json.NewEncoder(w).Encode(cell.Cell{ID: "cell-1", State: "deleted", Error: tt.savedError})
 			})
+			mux.HandleFunc("GET /v1alpha1/cells/cell-1/task-inference", func(w http.ResponseWriter, r *http.Request) {
+				if !tt.inference || !deleted.Load() {
+					t.Error("unexpected inference summary request")
+				}
+				_ = json.NewEncoder(w).Encode(cell.TaskInferenceSummary{Events: []cell.TaskInferenceEvent{
+					{EventID: "event-1", Timestamp: time.Unix(100, 0).UTC(), TaskInferenceDecision: cell.TaskInferenceDecision{
+						Decision: "result", Status: 200,
+					}},
+				}})
+			})
 			srv := httptest.NewServer(mux)
 			defer srv.Close()
 			c := &client.Client{HTTP: &http.Client{Transport: &http.Transport{
@@ -125,6 +152,10 @@ func TestExecuteTask(t *testing.T) {
 			}}}
 			defer c.HTTP.CloseIdleConnections()
 			got := executeTask(ctx, c, spec, req)
+			if tt.inference && (got.Inference == nil || len(got.Inference.Events) != 1 || got.Inference.Events[0].Status != 200) ||
+				!tt.inference && got.Inference != nil {
+				t.Fatalf("unexpected inference summary: %+v", got.Inference)
+			}
 			if got.CellID != "cell-1" || got.TaskID != req.TaskID || got.AttemptID != req.AttemptID || !deleted.Load() {
 				t.Fatalf("missing cleanup or correlation: %+v", got)
 			}
