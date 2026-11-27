@@ -4,11 +4,14 @@ package cell
 import (
 	"fmt"
 	"net"
+	"regexp"
 	"strings"
 	"time"
 )
 
 const APIVersion = "v1alpha1"
+
+var taskProfileName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 type Endpoint struct {
 	Host         string `json:"host"`
@@ -27,6 +30,9 @@ type Spec struct {
 	PIDs           int64      `json:"pids"`
 	TimeoutSeconds int        `json:"timeout_seconds"`
 	Allow          []Endpoint `json:"allow,omitempty"`
+
+	TaskInference *TaskInference `json:"task_inference,omitempty"`
+	TaskProfile   string         `json:"task_profile,omitempty"`
 }
 
 func (s *Spec) Defaults() {
@@ -71,6 +77,15 @@ func (s Spec) Validate() error {
 	}
 	if err := ValidateCommand(s.Command, s.Mode == "session"); err != nil {
 		return err
+	}
+	if s.TaskProfile != "" && (s.Mode != "session" || !taskProfileName.MatchString(s.TaskProfile)) {
+		return fmt.Errorf("task profile must be a valid profile name on a session")
+	}
+	if t := s.TaskInference; t != nil {
+		if s.Mode != "session" || len(s.Allow) != 0 || s.TimeoutSeconds > 300 ||
+			!ValidTaskInferenceID(t.TaskID) || !ValidTaskInferenceID(t.AttemptID) {
+			return fmt.Errorf("task inference requires a session without other egress, a lifetime of at most 300 seconds and valid task and attempt IDs")
+		}
 	}
 	if len(s.Allow) > 16 {
 		return fmt.Errorf("maximum 16 allowed endpoints")

@@ -139,6 +139,9 @@ func (m *Manager) Create(ctx context.Context, s cell.Spec) (cell.Cell, error) {
 	if err := s.Validate(); err != nil {
 		return cell.Cell{}, err
 	}
+	if s.TaskInference != nil && m.Proxy.TaskInference == nil {
+		return cell.Cell{}, fmt.Errorf("task inference is not configured on this Cell server")
+	}
 	if err := m.Store.Healthy(); err != nil {
 		return cell.Cell{}, err
 	}
@@ -183,7 +186,13 @@ func (m *Manager) Create(ctx context.Context, s cell.Spec) (cell.Cell, error) {
 	defer cancel()
 	stopPrepare := context.AfterFunc(i.ctx, cancel)
 	defer stopPrepare()
-	p, err := m.Backend.Prepare(prepCtx, i.id, s)
+	runtimeSpec := s
+	if s.TaskInference != nil {
+		// This exact internal name selects the existing isolated bridge.
+		// The proxy handles the name locally and denies direct destinations.
+		runtimeSpec.Allow = []cell.Endpoint{{Host: cell.TaskInferenceHost, Port: 80}}
+	}
+	p, err := m.Backend.Prepare(prepCtx, i.id, runtimeSpec)
 	if err != nil {
 		return fail(err)
 	}
@@ -205,8 +214,12 @@ func (m *Manager) Create(ctx context.Context, s cell.Spec) (cell.Cell, error) {
 		cleanup()
 		return fail(fmt.Errorf("startup cancelled"))
 	}
+	if s.TaskInference != nil && p.IP == "" {
+		cleanup()
+		return fail(fmt.Errorf("task inference requires an isolated proxy network"))
+	}
 	if p.IP != "" {
-		m.Proxy.Register(p.IP, network.Grant{CellID: i.id, Allow: s.Allow, Context: i.ctx})
+		m.Proxy.Register(p.IP, network.Grant{CellID: i.id, Allow: s.Allow, TaskInference: s.TaskInference, Context: i.ctx})
 	}
 	if err = m.emit(i.id, "", "control", "cell.prepared", map[string]any{"container_id": p.ContainerID, "expires_at": i.cell.ExpiresAt}); err != nil {
 		cleanup()
