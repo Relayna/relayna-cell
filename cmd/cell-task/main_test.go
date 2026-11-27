@@ -151,7 +151,7 @@ func TestExecuteTask(t *testing.T) {
 				},
 			}}}
 			defer c.HTTP.CloseIdleConnections()
-			got := executeTask(ctx, c, spec, req)
+			got := executeTask(ctx, c, spec, req, "", nil)
 			if tt.inference && (got.Inference == nil || len(got.Inference.Events) != 1 || got.Inference.Events[0].Status != 200) ||
 				!tt.inference && got.Inference != nil {
 				t.Fatalf("unexpected inference summary: %+v", got.Inference)

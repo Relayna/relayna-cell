@@ -37,14 +37,16 @@ type taskRequest struct {
 }
 
 type taskResponse struct {
-	Status      string                     `json:"status"`
-	TaskID      string                     `json:"task_id"`
-	AttemptID   string                     `json:"attempt_id"`
-	CellID      string                     `json:"cell_id,omitempty"`
-	ExecutionID string                     `json:"execution_id,omitempty"`
-	Result      json.RawMessage            `json:"result,omitempty"`
-	Error       string                     `json:"error,omitempty"`
-	Inference   *cell.TaskInferenceSummary `json:"inference,omitempty"`
+	Status           string                     `json:"status"`
+	TaskID           string                     `json:"task_id"`
+	AttemptID        string                     `json:"attempt_id"`
+	CellID           string                     `json:"cell_id,omitempty"`
+	ExecutionID      string                     `json:"execution_id,omitempty"`
+	Result           json.RawMessage            `json:"result,omitempty"`
+	Error            string                     `json:"error,omitempty"`
+	Profile          string                     `json:"profile,omitempty"`
+	ArtifactManifest string                     `json:"artifact_manifest,omitempty"`
+	Inference        *cell.TaskInferenceSummary `json:"inference,omitempty"`
 }
 
 func main() {
@@ -61,19 +63,62 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	socket := flags.String("socket", "/run/relayna-cell/api.sock", "local operator Unix socket")
 	timeout := flags.Int("timeout", 60, "execution and Cell lifetime in seconds (1–300)")
 	inference := flags.Bool("inference", false, "allow the configured task inference route")
+	profileFile := flags.String("profiles", "", "absolute path to an owner-only task profile catalog")
+	profileName := flags.String("profile", "", "operator-selected task profile name")
+	artifactDir := flags.String("artifact-dir", "", "absolute path to a private artifact output directory")
 	if err := flags.Parse(args); err != nil {
 		if err == flag.ErrHelp {
 			return 0
 		}
 		return 1
 	}
-	if flags.NArg() != 0 || *image == "" || !filepath.IsAbs(*socket) || *timeout < 1 || *timeout > 300 {
-		fmt.Fprintln(stderr, "usage: cell-task --image IMAGE [--socket ABSOLUTE_PATH] [--timeout 1–300] [--inference]")
+	if flags.NArg() != 0 || !filepath.IsAbs(*socket) {
+		fmt.Fprintln(stderr, "cell-task needs an absolute socket path and accepts no positional arguments")
 		return 1
 	}
-	spec := cell.Spec{
-		Image: *image, Mode: "session", CPU: 1, MemoryMiB: 256,
-		WorkspaceMiB: 16, PIDs: 32, TimeoutSeconds: *timeout,
+	spec := taskDefaults(*image, *timeout)
+	var artifactPaths []string
+	if *profileFile != "" || *profileName != "" {
+		profile, err := loadTaskProfile(*profileFile, *profileName)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		spec = profile.spec()
+		var conflict bool
+		flags.Visit(func(f *flag.Flag) {
+			switch f.Name {
+			case "image":
+				conflict = conflict || *image != spec.Image
+			case "timeout":
+				conflict = conflict || *timeout != spec.TimeoutSeconds
+			case "inference":
+				conflict = conflict || *inference != profile.Inference
+			}
+		})
+		if conflict {
+			fmt.Fprintln(stderr, "launcher flags disagree with the selected task profile")
+			return 1
+		}
+		*inference = profile.Inference
+		artifactPaths = profile.ArtifactPaths
+	}
+	if spec.TimeoutSeconds < 1 || spec.TimeoutSeconds > 300 {
+		fmt.Fprintln(stderr, "task timeout must be 1–300 seconds")
+		return 1
+	}
+	spec.TaskProfile = *profileName
+	if err := spec.Validate(); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	export, err := openArtifactExport(*artifactDir, artifactPaths)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if export != nil {
+		defer export.root.Close()
 	}
 	req, err := readRequest(stdin)
 	if err != nil {
@@ -82,14 +127,14 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 	if *inference {
 		spec.TaskInference = &cell.TaskInference{TaskID: req.TaskID, AttemptID: req.AttemptID}
-	}
-	if err := spec.Validate(); err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+		if err := spec.Validate(); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
 	}
 	c := client.New(*socket)
 	defer c.HTTP.CloseIdleConnections()
-	response := executeTask(ctx, c, spec, req)
+	response := executeTask(ctx, c, spec, req, *profileName, export)
 	enc := json.NewEncoder(stdout)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(response); err != nil {
@@ -137,11 +182,13 @@ func taskName(taskID, attemptID string) string {
 	return fmt.Sprintf("sdk-task:%x", sha256.Sum256([]byte(key)))
 }
 
-func executeTask(parent context.Context, c *client.Client, spec cell.Spec, req taskRequest) (response taskResponse) {
+func executeTask(parent context.Context, c *client.Client, spec cell.Spec, req taskRequest, profile string, export *artifactExport) (response taskResponse) {
 	ctx, cancel := context.WithTimeout(parent, time.Duration(spec.TimeoutSeconds)*time.Second)
 	defer cancel()
-	response = taskResponse{Status: "failed", TaskID: req.TaskID, AttemptID: req.AttemptID}
+	response = taskResponse{Status: "failed", TaskID: req.TaskID, AttemptID: req.AttemptID, Profile: profile}
+	var staged *stagedArtifacts
 	spec.Name = taskName(req.TaskID, req.AttemptID)
+	spec.TaskProfile = profile
 	created, err := c.Create(ctx, spec)
 	response.CellID = created.ID
 	if created.ID != "" {
@@ -153,10 +200,6 @@ func executeTask(parent context.Context, c *client.Client, spec cell.Spec, req t
 				response.Status = "failed"
 				response.Error = "Cell cleanup could not be confirmed"
 				response.Result = nil
-			} else if response.Status == "completed" && parent.Err() != nil {
-				response.Status = "failed"
-				response.Error = "Cell task canceled"
-				response.Result = nil
 			}
 			if spec.TaskInference != nil {
 				summary, err := taskInferenceSummary(cleanupCtx, c, created.ID)
@@ -166,6 +209,24 @@ func executeTask(parent context.Context, c *client.Client, spec cell.Spec, req t
 					response.Status = "failed"
 					response.Error = "Cell task inference audit could not be read"
 					response.Result = nil
+				}
+			}
+			if response.Status == "completed" && parent.Err() != nil {
+				response.Status = "failed"
+				response.Error = "Cell task canceled"
+				response.Result = nil
+			}
+			if staged != nil {
+				defer staged.discard()
+				if response.Status == "completed" {
+					manifest, err := staged.publish()
+					if err != nil {
+						response.Status = "failed"
+						response.Error = "Cell artifact export could not be published"
+						response.Result = nil
+					} else {
+						response.ArtifactManifest = manifest
+					}
 				}
 			}
 		}()
@@ -218,6 +279,13 @@ func executeTask(parent context.Context, c *client.Client, spec cell.Spec, req t
 	case !isJSONObject(output.Bytes()):
 		response.Error = "Cell task stdout must be one UTF-8 JSON object"
 	default:
+		if export != nil {
+			staged, err = export.collect(ctx, c, response)
+			if err != nil {
+				response.Error = "Cell required artifact export failed"
+				return
+			}
+		}
 		response.Status = "completed"
 		response.Result = output.Bytes()
 	}

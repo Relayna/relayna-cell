@@ -124,3 +124,77 @@ After cleanup the launcher projects up to 64 trusted journal decisions in
 `meta.cell.inference` for Studio. Cell records the task and attempt on its
 trusted `cell.requested` event and uses the Cell ID to join decisions. Summary
 events omit request and response bodies, raw headers and credentials.
+
+## Select a reusable task profile
+
+Put the catalog under an operator-controlled directory and set its mode to
+`0600`. Select the profile in the trusted launcher command. Task input
+continues to contain only the task ID, attempt ID, and payload.
+
+```json
+{
+  "profiles": {
+    "reports": {
+      "image": "relayna-cell/report-worker:local",
+      "cpu": 1,
+      "memory_mib": 256,
+      "workspace_mib": 32,
+      "pids": 32,
+      "timeout_seconds": 60,
+      "inference": false,
+      "artifacts": ["reports/summary.json"]
+    }
+  }
+}
+```
+
+Omitted resource settings use the standard launcher defaults. Inference is
+off by default. A profile that enables it uses the server's existing scoped
+inference configuration. When the SDK already passes image, timeout or
+inference flags, the launcher checks that they match the profile.
+
+```sh
+sudo install -d -m 0700 /var/lib/relayna-cell/task-artifacts
+printf '%s\n' '{"task_id":"report-1","attempt_id":"first","payload":{}}' |
+  sudo ./bin/cell-task --profiles /etc/relayna-cell/task-profiles.json \
+    --profile reports --artifact-dir /var/lib/relayna-cell/task-artifacts
+```
+
+For SDK deployments, configure a wrapper to select the profile and private
+output directory, then pass through the SDK's fixed flags.
+
+```sh
+#!/bin/sh
+exec /usr/local/bin/cell-task --profiles /etc/relayna-cell/task-profiles.json \
+  --profile reports --artifact-dir /var/lib/relayna-cell/task-artifacts "$@"
+```
+
+The workload writes its requested files under `/workspace`. Each entry is a
+required relative file path. The launcher downloads at most eight files,
+limited to 4 MiB each and 16 MiB total. It publishes the bundle only after
+execution succeeds and deletion is confirmed. Failure to fetch a required
+file fails the attempt. The attempt response carries `profile` and the
+relative `artifact_manifest` path. The manifest identifies the task, attempt,
+Cell, and execution and lists each file's path, byte count and SHA-256.
+Artifact bytes are available under `files/` alongside the manifest. An
+operator can retrieve the bundle on the launcher host. Size limits apply per
+attempt. Set retention on the private output volume for long-running services.
+
+## Archive audit exports
+
+Provision a private archive directory outside the server's hot `logs`
+directory, ideally on a volume with independent retention.
+
+```sh
+sudo install -d -m 0700 /var/lib/relayna-cell-audit
+sudo cell-server --audit-archive-dir /var/lib/relayna-cell-audit \
+    --audit-hot-retention 24h
+```
+
+The server checks at startup and every minute. Once a segment is old enough,
+the server durably copies it to the archive before removing it from the hot
+export directory. Preserve enough hot history for Alloy to catch up.
+SQLite keeps the authoritative events, so `cell events` and replay continue
+to work after archival. Back up the database and archive volume according to
+the evidence retention period you need. Manually generated replay files are
+managed by the operator.

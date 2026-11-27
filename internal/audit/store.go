@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,8 @@ import (
 
 const MaxJournalBytes int64 = 256 << 20
 const segmentBytes int64 = 8 << 20
+
+var errJournalFull = errors.New("audit journal is full; archive old exports to release capacity")
 
 type Store struct {
 	mu          sync.Mutex
@@ -84,7 +87,7 @@ func (s *Store) Emit(cellID, execID, source, kind string, data any) error {
 		return fmt.Errorf("event exceeds 256 KiB")
 	}
 	if s.total+int64(len(b))+128 > MaxJournalBytes {
-		s.fault = fmt.Errorf("audit journal is full; archive records before restarting the server")
+		s.fault = errJournalFull
 		return s.fault
 	}
 	tx, err := s.db.Begin()

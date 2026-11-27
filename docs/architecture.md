@@ -41,7 +41,7 @@ At process exit or deadline, the controller drains available output, records the
 
 An event has a stable event ID, monotonic journal sequence, timestamp, Cell ID, optional execution ID, source, kind, and payload. The source is assigned by the trusted producer, never extracted from workload text. SQLite commits precede JSONL export, so export failure leaves a recoverable journal entry and stops further admission.
 
-Alloy reads exported segments, parses only the outer envelope, preserves event IDs as structured metadata, removes filename labels, and writes to Loki. Seven-day Loki retention is independent of Cell lifetime. Local journal exports have a fixed capacity; archival is operator-managed for the MVP. File positions and retries improve recovery but do not establish exactly-once ingestion. The replay utility exports the original records when Cell is stopped.
+Alloy reads exported segments, parses only the outer envelope, preserves event IDs as structured metadata, removes filename labels, and writes to Loki. Seven-day Loki retention is independent of Cell lifetime. Local journal exports have a fixed capacity. An optional server policy archives aged segments outside the Alloy directory after durably copying them. File positions and retries improve recovery but do not establish exactly-once ingestion. The replay utility exports the original records when Cell is stopped.
 
 Grafana has an overview with summary counts, activity trends, outcome distributions, binary/destination rankings, and a Cell outcome table. Its Cell links open an investigation dashboard with readable lifecycle, API command, process, network, and output records plus expandable raw JSON. Both dashboards share a Cell ID regex filter and time range. Whole-window totals deduplicate event IDs (Cell IDs for requested-Cell counts); interval charts count received records. Loki coverage, replay, and retention can differ from the authoritative SQLite journal. The dashboards do not infer live state or CPU/memory utilization from audit events. Service lifecycle and failure records use the same journal. Infrastructure diagnostics remain in their bounded Docker/systemd logs.
 
@@ -49,14 +49,19 @@ Grafana has an overview with summary counts, activity trends, outcome distributi
 
 - Split privileged host operations from the control plane before remote or multi-tenant use.
 - Add capability discovery, per-principal authorization, and a production secret-broker design.
-- Add automatic audit archival, retention, ingestion-lag/drop alerting, and recovery tooling.
+- Add audit ingestion-lag and drop alerting and expand recovery tooling.
 - Extend workload compatibility and benchmark monitoring overhead against representative agents.
-- Add persistent workspace options and artifact export on exit with explicit quotas.
+- Add persistent workspace options.
 - Implement Kubernetes as a backend, evaluating SIG Agent Sandbox for provisioning.
 
 The deterministic integration fixture verifies enforcement and protocol routing without a model download. A separate `make model-smoke` uses a local Ollama container, Qwen3 4B Instruct, and OpenAI Agents SDK for Python to test both execution modes with generated code and independent assertions. The framework integration remains outside the Go core: Cell does not depend on any agent framework.
 
 Ollama is shared infrastructure outside gVisor, with a persistent model volume and bounded CPU/memory. A separate gateway exposes only Chat Completions, so granting inference does not also grant Ollama's model-management APIs. The deployment publishes no host ports. The SDK's external runner is trusted and receives the local management socket; contained SDK agents have only the inference endpoint grant. OpenAI trace export and Ollama cloud features are disabled for this local test. Framework events are workload claims; SecCheck events remain the independent process evidence.
+
+The SDK task launcher supports operator-selected profiles and bounded,
+per-attempt artifact bundles. The server can archive older exports while
+keeping all authoritative records in SQLite. See the
+[task execution and evidence setup](../examples/relayna-sdk-task/README.md).
 
 ## References
 

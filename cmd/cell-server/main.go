@@ -30,6 +30,8 @@ func run() error {
 	data := flag.String("data-dir", "/var/lib/relayna-cell", "persistent state directory")
 	rundir := flag.String("run-dir", "/run/relayna-cell", "Unix socket directory")
 	containerEngine := flag.String("engine", "docker", "local rootful container engine: docker or podman")
+	archiveDir := flag.String("audit-archive-dir", "", "absolute path to a private audit export archive")
+	hotRetention := flag.Duration("audit-hot-retention", 24*time.Hour, "minimum age of an audit segment before archival")
 	taskInferenceConfig := flag.String("task-inference-config", "", "owner-only SDK task inference configuration file")
 	flag.Parse()
 	if os.Geteuid() != 0 {
@@ -52,6 +54,14 @@ func run() error {
 		return e
 	}
 	defer store.Close()
+	if *archiveDir != "" {
+		if *hotRetention <= 0 {
+			return fmt.Errorf("audit hot retention must be positive")
+		}
+		if e = store.ArchiveExports(*archiveDir, time.Now().Add(-*hotRetention)); e != nil {
+			return fmt.Errorf("prepare audit archive: %w", e)
+		}
+	}
 	var backend engine.Backend
 	switch *containerEngine {
 	case "docker":
@@ -112,6 +122,28 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if *archiveDir != "" {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case now := <-ticker.C:
+					if err := store.ArchiveExports(*archiveDir, now.Add(-*hotRetention)); err != nil {
+						fmt.Fprintf(os.Stderr, "audit archival failed: %v\n", err)
+					}
+				}
+			}
+		}()
+		defer func() {
+			stop()
+			<-done
+		}()
+	}
 	select {
 	case <-ctx.Done():
 	case e = <-errs:
